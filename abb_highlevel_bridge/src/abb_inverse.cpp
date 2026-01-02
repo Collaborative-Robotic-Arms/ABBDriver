@@ -11,18 +11,30 @@
 // These must match your robot's setup in the SRDF and configuration files
 static const std::string ROBOT_GROUP_NAME = "irb120_arm"; 
 static const std::string END_EFFECTOR_LINK = "tool0";     
-static const std::string POSE_TOPIC_NAME = "/aruco_pose";
 // ---------------------
+
+// --- FIXED ORIENTATION ---
+// Last known fixed orientation requested (W, X, Y, Z)
+static constexpr double TARGET_QW = 0.0; 
+static constexpr double TARGET_QX = 0.70711;
+static constexpr double TARGET_QY = 0.0;
+static constexpr double TARGET_QZ = 0.7071;
+
+// Helper struct to define target positions
+struct TargetPosition {
+    double x;
+    double y;
+    double z;
+};
 
 class MoveItPoseController : public rclcpp::Node
 {
 public:
+    // FIX: Pass rclcpp::NodeOptions() to the base constructor.
+    // This tells the node to use the name assigned by the launch environment (the Node action).
     MoveItPoseController() : Node("abb_inverse_control", rclcpp::NodeOptions())
     {
         RCLCPP_INFO(this->get_logger(), "Initializing MoveItPoseController...");
-        
-        
-        RCLCPP_INFO(this->get_logger(), "Subscribed to %s for real-time IK control.", POSE_TOPIC_NAME.c_str());
     }
 
     // Initialize MoveGroupInterface AFTER the node is added to executor
@@ -31,20 +43,20 @@ public:
         try
         {
             // Give the planning components time to initialize on the ROS 2 graph
-            
-            
             rclcpp::sleep_for(std::chrono::seconds(2));
 
             RCLCPP_INFO(this->get_logger(), "Creating MoveGroupInterface...");
 
             // Now shared_from_this() will work because node is managed by shared_ptr
-            move_group_ = std::make_shared<moveit::planning_interface::MoveGroupInterface>(shared_from_this(), ROBOT_GROUP_NAME);
-
+            move_group_ = std::make_shared<moveit::planning_interface::MoveGroupInterface>(
+                shared_from_this(),
+                ROBOT_GROUP_NAME
+            );
 
             // Set the end effector link
             move_group_->setEndEffectorLink(END_EFFECTOR_LINK);
 
-            // --- Increased Solver Robustness ---
+            // --- INCREASED SOLVER ROBUSTNESS ---
             
             // Set position tolerance to 1 mm (0.001 m)
             move_group_->setGoalPositionTolerance(0.001); 
@@ -52,19 +64,14 @@ public:
             // Set orientation tolerance to ~1 degree (0.017 radians)
             move_group_->setGoalOrientationTolerance(0.017); 
             
-            // Set planning time
+            // Set planning time (optional but recommended)
             move_group_->setPlanningTime(10.0); // seconds
-            move_group_->setNumPlanningAttempts(10); // Increase attempts
+            
+            // ---------------------------------------------------
 
-            // -----------------------------------
-            // 1. Initialize the subscriber in the constructor
-            pose_subscription_ = this->create_subscription<geometry_msgs::msg::PoseStamped>(
-                POSE_TOPIC_NAME,
-                rclcpp::QoS(1).transient_local(), // QoS: Keep last message, make it latching for new subscribers
-                std::bind(&MoveItPoseController::pose_callback, this, std::placeholders::_1)
-            );
             RCLCPP_INFO(this->get_logger(), "MoveGroupInterface initialized for group: %s", ROBOT_GROUP_NAME.c_str());
             RCLCPP_INFO(this->get_logger(), "End Effector Link set to: %s", move_group_->getEndEffectorLink().c_str());
+            RCLCPP_INFO(this->get_logger(), "Goal Tolerances set (Pos: 1mm, Orient: 1 deg).");
 
         }
         catch (const std::exception& e)
@@ -75,8 +82,10 @@ public:
     }
 
     /**
-     * @brief Plans and executes a motion to a target position AND a specific orientation.
-     * @param x, y, z The target position coordinates.
+     * @brief Plans and executes a motion to a target position AND a specific orientation. (Pose IK with Tolerance)
+     * @param x The target X coordinate.
+     * @param y The target Y coordinate.
+     * @param z The target Z coordinate.
      * @param qw, qx, qy, qz The quaternion orientation components.
      * @return true if planning and execution were successful, false otherwise.
      */
@@ -92,26 +101,25 @@ public:
         geometry_msgs::msg::Pose target_pose;
         
         target_pose.position.x = x;
-        target_pose.position.y = -y;
-        target_pose.position.z = z + 0.62;
+        target_pose.position.y = y;
+        target_pose.position.z = z;
         
-        // target_pose.orientation.w = 0.0;
-        // target_pose.orientation.x = 0.70711;
-        // target_pose.orientation.y = 0.0;
-        // target_pose.orientation.z = 0.7071;
-        target_pose.orientation.w = 0.0;
-        target_pose.orientation.x = 0.0;
-        target_pose.orientation.y = -1.0; // Note the negative sign
-        target_pose.orientation.z = 0.0;
-        // z: 1.035}, orientation: {w: 0.0, x: 0.70711, y: 0.0, z: 0.7071}}}"
+        target_pose.orientation.w = qw;
+        target_pose.orientation.x = qx;
+        target_pose.orientation.y = qy;
+        target_pose.orientation.z = qz;
+
         // 2. Set the target pose
         move_group_->setPoseTarget(target_pose);
         
-        RCLCPP_INFO(this->get_logger(), "Attempting to move %s to pose: P(%.4f, %.4f, %.4f) | Q(%.2f, %.2f, %.2f, %.2f)", 
-                    ROBOT_GROUP_NAME.c_str(), x, y, z, qw, qx, qy, qz);
+        RCLCPP_INFO(this->get_logger(), "Attempting to move %s to pose: x=%.4f, y=%.4f, z=%.4f", 
+                    ROBOT_GROUP_NAME.c_str(), x, y, z);
 
         // 3. Plan the motion
         moveit::planning_interface::MoveGroupInterface::Plan plan;
+        
+        // Increase planning attempts
+        move_group_->setNumPlanningAttempts(10); 
         
         bool success = (move_group_->plan(plan) == moveit::core::MoveItErrorCode::SUCCESS); 
 
@@ -122,47 +130,27 @@ public:
             // 4. Execute the trajectory
             moveit::core::MoveItErrorCode execute_result = move_group_->execute(plan);
             
-            move_group_->clearPoseTargets(); // Clear target after attempt
-            
-                if (execute_result == moveit::core::MoveItErrorCode::SUCCESS)
-                {
-                    RCLCPP_INFO(this->get_logger(), "Execution complete.");
-                    return true;
-                }
-                else
-                {
-                    RCLCPP_WARN(this->get_logger(), "Execution failed with code: %d", execute_result.val);
-                    return false;
-                }
+            if (execute_result == moveit::core::MoveItErrorCode::SUCCESS)
+            {
+                RCLCPP_INFO(this->get_logger(), "Execution complete.");
+                move_group_->clearPoseTargets();
+                return true;
+            }
+            else
+            {
+                RCLCPP_WARN(this->get_logger(), "Execution failed with code: %d", execute_result.val);
+                return false;
+            }
         }
         else
         {
             RCLCPP_WARN(this->get_logger(), "Planning failed. Check for unreachable pose or collisions.");
-            move_group_->clearPoseTargets(); // Clear target even if planning failed
             return false;
         }
     }
 
 private:
-    // 2. Add the subscription member
-    rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_subscription_;
     std::shared_ptr<moveit::planning_interface::MoveGroupInterface> move_group_;
-
-    /**
-     * @brief Callback executed when a new PoseStamped message is received.
-     */
-    void pose_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg)
-    {
-        RCLCPP_INFO(this->get_logger(), "--- NEW COMMAND RECEIVED ---");
-        RCLCPP_INFO(this->get_logger(), "Target received in frame: %s", msg->header.frame_id.c_str());
-
-        // Extract position and orientation from the received message
-        const auto& p = msg->pose.position;
-        const auto& q = msg->pose.orientation;
-
-        // Call the move function with the received pose data
-        this->move_to_pose(p.x, p.y, p.z, q.w, q.x, q.y, q.z);
-    }
 };
 
 int main(int argc, char **argv)
@@ -173,9 +161,10 @@ int main(int argc, char **argv)
     auto executor = std::make_shared<rclcpp::executors::MultiThreadedExecutor>();
     
     // Create the controller node
+    // It now uses rclcpp::NodeOptions() in its constructor to inherit the launch name.
     auto controller = std::make_shared<MoveItPoseController>(); 
     
-    // Add the node to the executor
+    // Add the node to the executor FIRST
     executor->add_node(controller);
 
     // Spin the executor in a separate thread
@@ -184,13 +173,53 @@ int main(int argc, char **argv)
     // NOW initialize MoveGroupInterface (after node is in executor)
     controller->initialize();
 
-    RCLCPP_INFO(controller->get_logger(), "Controller is running and waiting for target poses on %s...", POSE_TOPIC_NAME.c_str());
-    RCLCPP_INFO(controller->get_logger(), "Send a geometry_msgs::msg::PoseStamped message to command the robot.");
+    // --- Motion Commands (15 points, 5 second delay, Pose IK with Tolerance) ---
+
+    // Define the 15 target positions (mm to m conversion applied).
+    // Z is set to 1.035m (1035mm) for all points.
+    const std::vector<TargetPosition> target_positions = {
+        {0.360, 0.000, 1.035},    
+        {0.360, 0.100, 1.035},    
+        {0.360, -0.170, 1.035},   
+        {0.510, -0.170, 1.035},   
+        {0.510, -0.130, 1.035},   
+        {0.270, 0.230, 1.035},    
+        {0.430, 0.250, 1.035},    
+        {0.490, -0.090, 1.035},   
+        {0.530, -0.020, 1.035},
+        {0.430, 0.200, 1.035},    
+        {0.500, 0.200, 1.035},    
+        {0.430, 0.150, 1.035},    
+        {0.450, 0.200, 1.035},    
+        {0.450, 0.230, 1.035},
+        {0.360, 0.000, 1.035},    
+    };
+
+    RCLCPP_INFO(controller->get_logger(), "Starting 15-point motion sequence using POSE IK with tolerances (Z=1.035m).");
+    std::this_thread::sleep_for(std::chrono::seconds(1)); // Initial delay
+
+    for (size_t i = 0; i < target_positions.size(); ++i)
+    {
+        const auto& target = target_positions[i];
+        
+        RCLCPP_INFO(controller->get_logger(), "--- TARGET %zu/%zu ---", i + 1, target_positions.size());
+        
+        // Command the robot to move to the position and fixed orientation
+        controller->move_to_pose(
+            target.x, target.y, target.z,
+            TARGET_QW, TARGET_QX, TARGET_QY, TARGET_QZ
+        );
+        
+        // 5-second pause between movements
+        RCLCPP_INFO(controller->get_logger(), "Pausing for 5 seconds...");
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+    }
     
-    // The main thread waits for the executor thread to finish (which won't happen 
-    // until rclcpp::shutdown() is called, usually via Ctrl+C).
-    executor_thread.join();
+    RCLCPP_INFO(controller->get_logger(), "Motion sequence complete.");
     
+    // --- End of Motion Commands ---
+
     rclcpp::shutdown();
+    executor_thread.join();
     return 0;
 }
