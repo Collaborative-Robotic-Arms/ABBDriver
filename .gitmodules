@@ -16,3 +16,6 @@
 [submodule "abb_endeffector_control"]
 	path = abb_endeffector_control
 	url = https://github.com/Collaborative-Robotic-Arms/abb_endeffector_control.git
+[submodule "abb_highlevel_bridge"]
+	path = abb_highlevel_bridge
+	url = https://github.com/Collaborative-Robotic-Arms/abb_highlevel_bridge.git
